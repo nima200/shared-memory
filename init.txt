@@ -1,0 +1,5 @@
+reserve nima a
+reserve nima a 0
+reserve nima a 1
+reserve nima a
+status
