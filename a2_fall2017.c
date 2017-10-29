@@ -272,7 +272,6 @@ int execute(char **args, res_table **tables, sem_t **w_locks[2], sem_t **r_locks
     if (args[0] == NULL) {
         return -1;
     }
-    sleep(1);
     command command = checkCommand(args[0]);
     switch (command) {
         case reserve: {

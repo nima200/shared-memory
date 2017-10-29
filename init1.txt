@@ -15,7 +15,7 @@ reserve James A
 reserve James B
 reserve Nima B
 reserve Romeo A
-reserve Nima B
+init
 reserve Nima A 104
 reserve Nima A 109
 reserve nima B 210
