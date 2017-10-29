@@ -1,9 +1,9 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.5)
 project(assignment2)
 
 set(CMAKE_C_STANDARD 99)
 
-set(SOURCE_FILES main.c reservation_information.h main.h commands.c commands.h)
+set(SOURCE_FILES main.c reservation_information.h main.h commands.c commands.h readers.h)
 
 add_executable(assignment2 ${SOURCE_FILES})
 

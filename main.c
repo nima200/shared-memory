@@ -14,30 +14,46 @@
 int main(int argc, char **argv) {
     res_table* tableA;
     res_table* tableB;
-    sem_t** db_lock_A = malloc(sizeof(sem_t));
-    sem_t** db_lock_B = malloc(sizeof(sem_t));
-    *db_lock_A = sem_open("db_LockA", O_CREAT, 0644, 1);
-    *db_lock_B = sem_open("db_LockB", O_CREAT, 0644, 1);
-   /* (*db_lock_A)->__align = 1;
-    (*db_lock_B)->__align = 1;*/
-    initResTable("260606511_A", &tableA, 100, db_lock_A);
-    initResTable("260606511_B", &tableB, 200, db_lock_B);
+    db_reader* dbr_tableA;
+    db_reader* dbr_tableB;
+    // Allocate space to the semaphores
+    sem_t** x_lock_A = malloc(sizeof(sem_t));
+    sem_t** x_lock_B = malloc(sizeof(sem_t));
+    sem_t** r_lock_A = malloc(sizeof(sem_t));
+    sem_t** r_lock_B = malloc(sizeof(sem_t));
+    // Create a semaphore for each section's reservation tables
+    *x_lock_A = sem_open("x_LockA", O_CREAT, 0644, 1);
+    *x_lock_B = sem_open("x_LockB", O_CREAT, 0644, 1);
+    // Create a semaphore for each section's reader count
+    *r_lock_A = sem_open("s_lockA", O_CREAT, 0644, 1);
+    *r_lock_B = sem_open("s_lockB", O_CREAT, 0644, 1);
+   /* (*x_lock_A)->__align = 1;
+    (*x_lock_B)->__align = 1;*/
+    // Initialize shared memory space for the tables of each section
+    initResTable("260606511_A", &tableA, 100, x_lock_A);
+    initResTable("260606511_B", &tableB, 200, x_lock_B);
+    // Initialize shared memory space for reader counter, for each section
+    initDBReaders("260606511_A_r", &dbr_tableA, r_lock_A);
+    initDBReaders("260606511_B_r", &dbr_tableB, r_lock_B);
     res_table* tables[] = {tableA, tableB};
-    sem_t** db_locks[2] = {db_lock_A, db_lock_B};
+    db_reader* readers[] = {dbr_tableA, dbr_tableB};
+    sem_t** db_locks[2] = {x_lock_A, x_lock_B};
+    sem_t** r_locks[2] = {r_lock_A, r_lock_B};
     if (argc > 1) {
-        executeFile(argv[1], tables, db_locks);
+        executeFile(argv[1], tables, db_locks, r_locks, readers);
     }
     while (1) {
         char *args[4];
         initNullArr(args, 4);
-        int argCount = getCmd("\u03BB ", args);
-        if (execute(args, tables, db_locks) == -1) {
+        getCmd("\u03BB ", args);
+        if (execute(args, tables, db_locks, r_locks, readers) == -1) {
             printf("ERROR: Invalid command.\n");
         }
     }
 }
 
-void executeFile(char const *fileName, res_table  **tables, sem_t **db_locks[2]) {
+void
+executeFile(char const *fileName, res_table **tables, sem_t **db_locks[2], sem_t **r_locks[2], db_reader **readers) {
     FILE *file = fopen(fileName, "r");
     char line[256];
     while (fgets(line, sizeof(line), file)) {
@@ -45,11 +61,11 @@ void executeFile(char const *fileName, res_table  **tables, sem_t **db_locks[2])
         initNullArr(args, 4);
         char *lineCopy = line;
         parseCmd(args, &lineCopy);
-        execute(args, tables, db_locks);
+        execute(args, tables, db_locks, r_locks, readers);
     }
 }
 
-int initResTable(char *name, res_table **tables, int startingTable, sem_t **db_lock) {
+int initResTable(char *name, res_table **tables, int startingTable, sem_t **x_lock) {
     struct stat s;
     // Pass O_EXCL to know if it exists before -> fd = -1
     int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, S_IRWXU);
@@ -69,15 +85,44 @@ int initResTable(char *name, res_table **tables, int startingTable, sem_t **db_l
     (*tables) = mmap(NULL, sizeof(res_table), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     ftruncate(fd, sizeof(res_table));
     close(fd);
-    sem_wait((*db_lock));
-    // CRITICAL SECTION START
+    // WRITE TABLES START
+    sem_wait((*x_lock));
     for (int i = 0; i < MAX_RESERVATION_COUNT; i++) {
         (*tables)->reservations[i].table_number = startingTable + i;
         (*tables)->reservations[i].reserved = false;
         strcpy((*tables)->reservations[i].reservee, "None");
     }
-    sem_post((*db_lock));
+    sem_post((*x_lock));
+    // WRITE TABLES END
+    return 0;
+}
+
+
+int initDBReaders(char *name, db_reader **reader, sem_t **s_lock) {
+    struct stat s;
+    // Pass O_EXCL to know if it exists before or not -> fd = -1
+    int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, S_IRWXU);
+    // If it exists from before
+    if (fd < 0)  {
+        fd  = shm_open(name, O_CREAT | O_RDWR, S_IRWXU);
+        // Error occurred opening the shared memory
+        if (fd < 0) {
+            printf("ERROR: Could not open shared memory space\n");
+            return -1;
+        }
+    }
+    if (fstat(fd, &s) == -1) {
+        printf("ERROR: Could not verify size of shared memory object\n");
+        return -1;
+    }
+    (*reader)  = mmap(NULL, sizeof(db_reader), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ftruncate(fd, sizeof(db_reader));
+    // Get exclusive access to the reader object, to initialize it
+    sem_wait((*s_lock));
+    // CRITICAL SECTION START
+    (*reader)->count = 0;
     // CRITICAL SECTION END
+    sem_post((*s_lock));
     return 0;
 }
 
@@ -90,43 +135,76 @@ int initResTable(char *name, res_table **tables, int startingTable, sem_t **db_l
  *          -2 if table was already reserved
  *          'table number' if reservation was successful
  */
-int reserveTable(res_table **res_table, int tableNumber, char *reservee, sem_t **db_lock) {
+int reserveTable(res_table **res_table, int tableNumber, char *reservee, sem_t **w_lock, sem_t **r_lock,
+                 db_reader **reader) {
     if (tableNumber > MAX_RESERVATION_COUNT - 1) {
         // -1 for invalid table number
         return -1;
     }
-    sem_wait((*db_lock));
-    // CRITICAL SECTION START
+    // -1 if table was not specified by user
     if (tableNumber == -1) {
+        int reservedTable = -3; // Assume no tables available in this section for reservation
         for (int i = 0; i < MAX_RESERVATION_COUNT; i++) {
+            bool writeAccess = false;
+            // READ ON TABLES START
+            sem_wait((*r_lock));
+            (*reader)->count = (*reader)->count + 1;
+            if ((*reader)->count == 1) {
+                sem_wait((*w_lock));
+                writeAccess = true; // To know that we can write later
+            }
+            sem_post((*r_lock));
             if ((*res_table)->reservations[i].reserved == false) {
+                // WRITE ON TABLES START
+                if (!writeAccess) {
+                    sem_wait((*w_lock));
+                }
                 (*res_table)->reservations[i].reserved = true;
                 strcpy((*res_table)->reservations[i].reservee, reservee);
-                // CRITICAL SECTION END
-                sem_post((*db_lock));
-                // i for number of table reserved
-                return (*res_table)->reservations[i].table_number;
+                // WRITE ON TABLES END
+                if (!writeAccess) {
+                    sem_post((*w_lock)); // Only release the W_lock if you are only writing
+                }
+                reservedTable = (*res_table)->reservations[i].table_number;
+                // READ ON TABLES END
+                sem_wait((*r_lock));
+                (*reader)->count = (*reader)->count - 1;
+                if ((*reader)->count == 0) {
+                    sem_post((*w_lock));
+                }
+                sem_post((*r_lock));
+                break;
             }
+            // READ ON TABLES END
+            sem_wait((*r_lock));
+            (*reader)->count = (*reader)->count - 1;
+            if ((*reader)->count == 0) {
+                sem_post((*w_lock));
+            }
+            sem_post((*r_lock));
         }
-        // CRITICAL SECTION END
-        sem_post((*db_lock));
-        // No tables available in this section
-        return -3;
+        return reservedTable;
     } else {
+        // READ ON TABLE START
         if ((*res_table)->reservations[tableNumber].reserved == false) {
+            // WRITE ON TABLE START
             (*res_table)->reservations[tableNumber].reserved = true;
             strcpy((*res_table)->reservations[tableNumber].reservee, reservee);
-            sem_post((*db_lock));
+            // WRITE ON TABLE END
+            sem_post((*w_lock));
             return (*res_table)->reservations[tableNumber].table_number;
         } else {
-            // CRITICAL SECTION END
-            sem_post((*db_lock));
+            // READ ON TABLE END
             // -2 for table is already reserved
             return -2;
         }
     }
 }
-
+/**
+ * Initializes a char* array with NULL
+ * @param arr The array to initialize
+ * @param size The size of the array
+ */
 void initNullArr(char *arr[], int size) {
     for (int i = 0; i < size; ++i) {
         arr[i] = NULL;
@@ -174,7 +252,7 @@ int parseCmd(char **args, char **line) {
     return i;
 }
 
-int execute(char **args, res_table **tables, sem_t **db_locks[2]) {
+int execute(char **args, res_table **tables, sem_t **db_locks[2], sem_t **r_locks[2], db_reader **readers) {
     // Check if no args were passed
     if (args[0] == NULL) {
         return -1;
@@ -199,10 +277,10 @@ int execute(char **args, res_table **tables, sem_t **db_locks[2]) {
                 return 0;
             } else if (isA != 0) {
                 // Reserve for section A
-                reservationStatus = reserveTable(&tables[0], tableNumber, name, &(*db_locks[0]));
+                reservationStatus = reserveTable(&tables[0], tableNumber, name, &(*db_locks[0]), &(*r_locks[0]), &readers[0]);
             } else {
                 // Reserve for section B
-                reservationStatus = reserveTable(&tables[1], tableNumber, name, &(*db_locks[1]));
+                reservationStatus = reserveTable(&tables[1], tableNumber, name, &(*db_locks[1]), &(*r_locks[1]), &readers[1]);
             }
             validateReservation(name, section, reservationStatus);
             return 0;
