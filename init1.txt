@@ -1,0 +1,24 @@
+reserve Nima A
+reserve James B
+status
+reserve Nima A 100
+reserve Nima A 101
+reserve Mark B 101
+reserve Mark B 102
+reserve Mark B
+reserve Mark A
+reserve Nima A
+status
+init
+reserve Nima A 103
+reserve James A
+reserve James B
+reserve Nima B
+reserve Romeo A
+reserve Nima B
+reserve Nima A 104
+reserve Nima A 109
+reserve nima B 210
+reserve Jason B
+reserve Nima A
+status

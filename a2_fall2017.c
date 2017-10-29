@@ -7,9 +7,49 @@
 #include <memory.h>
 #include <ctype.h>
 #include <semaphore.h>
-#include "main.h"
-#include "commands.h"
+#define MAX_RESERVATION_COUNT 10
+#define FOREACH_COMMAND(command) \
+        command(reserve), \
+        command(init), \
+        command(status), \
+        command(invalid), \
+        command(EXIT) \
 
+#define GENERATE_ENUM(ENUM) ENUM
+#define GENERATE_STRING(STRING) #STRING
+
+typedef enum { FOREACH_COMMAND(GENERATE_ENUM) } command;
+static const char *COMMAND_STRING[] = {FOREACH_COMMAND(GENERATE_STRING)};
+command checkCommand(char *);
+
+// Struct declarations
+typedef enum { false, true } bool;
+
+typedef struct {
+    int table_number;
+    bool reserved;
+    char reservee[20];
+} res_info;
+
+typedef struct {
+    res_info reservations[MAX_RESERVATION_COUNT];
+} res_table;
+
+typedef struct {
+    int count;
+} db_reader;
+
+// Function declarations
+int initResTable(char *, res_table **, int, sem_t **);
+int reserveTable(res_table **, int, char *, sem_t **);
+void initNullArr(char**, int);
+int getCmd(char*, char**);
+int parseCmd(char **, char **);
+int execute(char **, res_table **, sem_t **[2], sem_t **[2], db_reader **);
+void validateReservation(const char *, const char *, int);
+void executeFile(char const *, res_table **, sem_t **[2], sem_t **[2], db_reader **);
+void printReservations(res_table **, char *, sem_t **w_lock, sem_t **, db_reader **reader);
+int initDBReaders(char *, db_reader **, sem_t **);
 
 int main(int argc, char **argv) {
     res_table* tableA;
@@ -27,8 +67,6 @@ int main(int argc, char **argv) {
     // Create a semaphore for each section's reader count
     *r_lock_A = sem_open("s_lockA", O_CREAT, 0644, 1);
     *r_lock_B = sem_open("s_lockB", O_CREAT, 0644, 1);
-   /* (*x_lock_A)->__align = 1;
-    (*x_lock_B)->__align = 1;*/
     // Initialize shared memory space for the tables of each section
     initResTable("260606511_A", &tableA, 100, x_lock_A);
     initResTable("260606511_B", &tableB, 200, x_lock_B);
@@ -135,69 +173,46 @@ int initDBReaders(char *name, db_reader **reader, sem_t **s_lock) {
  *          -2 if table was already reserved
  *          'table number' if reservation was successful
  */
-int reserveTable(res_table **res_table, int tableNumber, char *reservee, sem_t **w_lock, sem_t **r_lock,
-                 db_reader **reader) {
-    if (tableNumber > MAX_RESERVATION_COUNT - 1) {
+int reserveTable(res_table **res_table, int tableNumber, char *reservee, sem_t **w_lock) {
+    if (tableNumber >= 100 && tableNumber < 200) {
+        tableNumber = tableNumber - 100;
+    } else if (tableNumber >= 200) {
+        tableNumber = tableNumber - 200;
+    }
+    if (tableNumber > MAX_RESERVATION_COUNT - 1 || tableNumber < -1) {
         // -1 for invalid table number
         return -1;
     }
     // -1 if table was not specified by user
     if (tableNumber == -1) {
-        int reservedTable = -3; // Assume no tables available in this section for reservation
+         // Assume no tables available in this section for reservation
+        int reservation = -3;
+        // WRITE TABLE START
+        sem_wait((*w_lock));
         for (int i = 0; i < MAX_RESERVATION_COUNT; i++) {
-            bool writeAccess = false;
-            // READ ON TABLES START
-            sem_wait((*r_lock));
-            (*reader)->count = (*reader)->count + 1;
-            if ((*reader)->count == 1) {
-                sem_wait((*w_lock));
-                writeAccess = true; // To know that we can write later
-            }
-            sem_post((*r_lock));
-            if ((*res_table)->reservations[i].reserved == false) {
-                // WRITE ON TABLES START
-                if (!writeAccess) {
-                    sem_wait((*w_lock));
-                }
+            if (!(*res_table)->reservations[i].reserved) {
                 (*res_table)->reservations[i].reserved = true;
                 strcpy((*res_table)->reservations[i].reservee, reservee);
-                // WRITE ON TABLES END
-                if (!writeAccess) {
-                    sem_post((*w_lock)); // Only release the W_lock if you are only writing
-                }
-                reservedTable = (*res_table)->reservations[i].table_number;
-                // READ ON TABLES END
-                sem_wait((*r_lock));
-                (*reader)->count = (*reader)->count - 1;
-                if ((*reader)->count == 0) {
-                    sem_post((*w_lock));
-                }
-                sem_post((*r_lock));
+                reservation = (*res_table)->reservations[i].table_number;
                 break;
             }
-            // READ ON TABLES END
-            sem_wait((*r_lock));
-            (*reader)->count = (*reader)->count - 1;
-            if ((*reader)->count == 0) {
-                sem_post((*w_lock));
-            }
-            sem_post((*r_lock));
         }
-        return reservedTable;
+        // WRITE TABLE END
+        sem_post((*w_lock));
+        return reservation;
     } else {
-        // READ ON TABLE START
+        // Assume the table is already reserved
+        int reservation = -2;
+        // WRITE TABLE START
+        sem_wait((*w_lock));
         if ((*res_table)->reservations[tableNumber].reserved == false) {
-            // WRITE ON TABLE START
             (*res_table)->reservations[tableNumber].reserved = true;
             strcpy((*res_table)->reservations[tableNumber].reservee, reservee);
-            // WRITE ON TABLE END
-            sem_post((*w_lock));
-            return (*res_table)->reservations[tableNumber].table_number;
-        } else {
-            // READ ON TABLE END
-            // -2 for table is already reserved
-            return -2;
+            reservation = (*res_table)->reservations[tableNumber].table_number;
         }
+        sem_post((*w_lock));
+        // WRITE TABLE END
+        return reservation;
     }
 }
 /**
@@ -252,7 +267,7 @@ int parseCmd(char **args, char **line) {
     return i;
 }
 
-int execute(char **args, res_table **tables, sem_t **db_locks[2], sem_t **r_locks[2], db_reader **readers) {
+int execute(char **args, res_table **tables, sem_t **w_locks[2], sem_t **r_locks[2], db_reader **readers) {
     // Check if no args were passed
     if (args[0] == NULL) {
         return -1;
@@ -277,29 +292,31 @@ int execute(char **args, res_table **tables, sem_t **db_locks[2], sem_t **r_lock
                 return 0;
             } else if (isA != 0) {
                 // Reserve for section A
-                reservationStatus = reserveTable(&tables[0], tableNumber, name, &(*db_locks[0]), &(*r_locks[0]), &readers[0]);
+                reservationStatus = reserveTable(&tables[0], tableNumber, name, &(*w_locks[0]));
             } else {
                 // Reserve for section B
-                reservationStatus = reserveTable(&tables[1], tableNumber, name, &(*db_locks[1]), &(*r_locks[1]), &readers[1]);
+                reservationStatus = reserveTable(&tables[1], tableNumber, name, &(*w_locks[1]));
             }
             validateReservation(name, section, reservationStatus);
             return 0;
         }
         case init:
-            initResTable("260606511_A", &tables[0], 100, &(*db_locks[0]));
-            initResTable("260606511_B", &tables[1], 200, &(*db_locks[1]));
+            initResTable("260606511_A", &tables[0], 100, &(*w_locks[0]));
+            initResTable("260606511_B", &tables[1], 200, &(*w_locks[1]));
             printf("Successfully re-initialized all reservation tables\n");
             return 0;
         case status:
-            printReservations(&tables[0], "A", &(*db_locks[0]));
-            printReservations(&tables[1], "B", &(*db_locks[1]));
+            printReservations(&tables[0], "A", &(*w_locks[0]), &(*r_locks[0]), &readers[0]);
+            printReservations(&tables[1], "B", &(*w_locks[1]), &(*r_locks[1]), &readers[1]);
             break;
         case invalid:
             return -1;
         case EXIT:
             // Free the semaphores
-            free(&(*db_locks[0]));
-            free(&(*db_locks[1]));
+            free(&(*w_locks[0]));
+            free(&(*w_locks[1]));
+            free(&(*r_locks[0]));
+            free(&(*r_locks[1]));
             exit(0);
     }
 }
@@ -322,18 +339,34 @@ void validateReservation(const char *name, const char *section, int reservationS
  * @param tables The reservation array
  * @param section The reservation section
  */
-void printReservations(res_table **tables, char *section, sem_t **db_lock) {
-    sem_wait((*db_lock));
-    // CRITICAL SECTION START
+void printReservations(res_table **tables, char *section, sem_t **w_lock, sem_t **r_lock, db_reader **reader) {
+    // READ TABLES START
+    sem_wait((*r_lock));
+    (*reader)->count = (*reader)->count + 1;
+    if ((*reader)->count == 1) {
+        sem_wait((*w_lock));
+    }
+    sem_post((*r_lock));
     for (int i = 0; i < MAX_RESERVATION_COUNT; i++) {
-        /*printf("[Section %s] [Table %d] [Reservee: %s] [Currently reserved: %s]\n"
-        , section, i, (*tables)->reservations[i].reservee, (*tables)->reservations[i].reserved ? "Yes" : "No");*/
         printf("[Section %s] ", section);
         printf("[Table %d] ", i);
         printf("[Reservee: %s] ", (*tables)->reservations[i].reservee);
         printf("[Currently reserved: %s]\n", (*tables)->reservations[i].reserved ? "Yes": "No");
     }
-    // CRITICAL SECTION END
-    sem_post((*db_lock));
     printf("---------------------------------------------------------------\n");
+    sem_wait((*r_lock));
+    (*reader)->count = (*reader)->count - 1;
+    if ((*reader)->count == 0) {
+        sem_post((*w_lock));
+    }
+    sem_post((*r_lock));
+    // READ TABLES END
+}
+
+command checkCommand(char *command) {
+    if (strcmp(command, COMMAND_STRING[reserve]) == 0) return reserve;
+    if (strcmp(command, COMMAND_STRING[init]) == 0) return init;
+    if (strcmp(command, COMMAND_STRING[status]) == 0) return status;
+    if (strcmp(command, "exit") == 0) return EXIT;
+    return invalid;
 }
